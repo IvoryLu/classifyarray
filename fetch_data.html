@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TensorFlow.js TFLite Model Inference</title>
+    <!-- Load TF.js core -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.16.0/dist/tf.min.js"></script>
+    <!-- Load WASM backend -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.16.0/dist/tf-backend-wasm.js"></script>
+    <!-- Load TF.js TFLite -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/tf-tflite.min.js"></script>
+    <style>
+        body { 
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        #result, #modelStatus, #apiStatus {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+        }
+        .history {
+            max-height: 300px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #ddd;
+            margin-top: 10px;
+        }
+        .history-item {
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <h1>TensorFlow.js TFLite Model Inference</h1>
+    
+    <div class="container">
+        <h2>Model Status</h2>
+        <div id="modelStatus">Initializing model...</div>
+    </div>
+
+    <div class="container">
+        <h2>API Data</h2>
+        <div id="apiStatus">Waiting for data...</div>
+        <div id="result"></div>
+        <div id="history" class="history">
+            <h3>Inference History</h3>
+        </div>
+    </div>
+
+    <script>
+        let tfliteModel = null;
+        const MODEL_URL = 'https://ivorylu.github.io/classifyarray/waveform_classifier.tflite';
+        const API_URL = 'http://localhost:5000/get_data';
+        let isProcessing = false;
+
+        // Initialize everything when the page loads
+        window.addEventListener('load', async () => {
+            await initializeModel();
+            await startContinuousInference();
+        });
+
+        // Configure WASM path
+        tf.wasm.setWasmPaths(
+            'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.16.0/dist/'
+        );
+
+        async function initializeModel() {
+            const statusDiv = document.getElementById('modelStatus');
+            
+            try {
+                statusDiv.innerHTML = 'Initializing WASM backend...';
+                
+                // Initialize WASM backend
+                await tf.setBackend('wasm');
+                await tf.ready();
+                
+                if (tf.getBackend() !== 'wasm') {
+                    throw new Error('Failed to initialize WASM backend');
+                }
+                
+                statusDiv.innerHTML = 'Loading TFLite runtime...';
+                
+                if (!tflite || typeof tflite.loadTFLiteModel !== 'function') {
+                    throw new Error('TFLite runtime not properly initialized');
+                }
+                
+                statusDiv.innerHTML = 'Fetching model...';
+                tfliteModel = await tflite.loadTFLiteModel(MODEL_URL);
+                
+                statusDiv.innerHTML = 'Model loaded successfully!';
+                
+            } catch (error) {
+                statusDiv.innerHTML = `Error: ${error.message}`;
+                console.error('Model initialization error:', error);
+            }
+        }
+
+        async function fetchData() {
+            const apiStatusDiv = document.getElementById('apiStatus');
+            try {
+                apiStatusDiv.innerHTML = 'Fetching data from API...';
+                const response = await fetch(API_URL);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                apiStatusDiv.innerHTML = 'Data fetched successfully!';
+                return data;
+            } catch (error) {
+                apiStatusDiv.innerHTML = `API Error: ${error.message}`;
+                throw error;
+            }
+        }
+
+        async function runInference(numbers) {
+            const resultDiv = document.getElementById('result');
+            const historyDiv = document.getElementById('history');
+            
+            if (!tfliteModel) {
+                resultDiv.innerHTML = '<p style="color: red;">Model not loaded.</p>';
+                return;
+            }
+            
+            try {
+                // Validate input
+                if (numbers.some(isNaN)) {
+                    throw new Error('Invalid input: please ensure all values are numbers');
+                }
+                
+                // Create input tensor
+                const inputTensor = tf.tensor(numbers, [1, numbers.length]);
+                
+                // Run inference
+                const outputs = await tfliteModel.predict(inputTensor);
+                const prediction = outputs instanceof Array ? outputs[0] : outputs;
+                
+                // Get predictions
+                const predictionData = await prediction.data();
+                const classification = predictionData[0] > 0.5 ? 'Linear' : 'Non-linear';
+                
+                // Create result HTML
+                const resultHTML = `
+                    <h3>Latest Inference Results:</h3>
+                    <p>Input data: [${numbers.map(v => v.toFixed(4)).join(', ')}]</p>
+                    <p>Input shape: ${inputTensor.shape}</p>
+                    <p>Output shape: ${prediction.shape}</p>
+                    <p>Predictions: [${Array.from(predictionData).map(v => v.toFixed(4)).join(', ')}]</p>
+                    <p>Classification: ${classification}</p>
+                `;
+                
+                resultDiv.innerHTML = resultHTML;
+
+                // Add to history
+                const historyItem = document.createElement('div');
+                historyItem.className = 'history-item';
+                historyItem.innerHTML = `
+                    <p><strong>Time:</strong> ${new Date().toLocaleTimeString()}</p>
+                    <p><strong>Classification:</strong> ${classification}</p>
+                    <p><strong>Confidence:</strong> ${(Math.abs(predictionData[0] - 0.5) * 2).toFixed(4)}</p>
+                `;
+                historyDiv.insertBefore(historyItem, historyDiv.firstChild.nextSibling);
+                
+                // Cleanup
+                inputTensor.dispose();
+                prediction.dispose();
+                if (outputs instanceof Array) {
+                    outputs.forEach(t => t.dispose());
+                }
+                
+            } catch (error) {
+                resultDiv.innerHTML = `<p style="color: red;">Error during inference: ${error.message}</p>`;
+                console.error('Inference error:', error);
+            }
+        }
+
+        async function startContinuousInference() {
+            while (true) {
+                if (!isProcessing) {
+                    try {
+                        isProcessing = true;
+                        const data = await fetchData();
+                        await runInference(data.numbers);
+                    } catch (error) {
+                        console.error('Error in continuous inference:', error);
+                        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying on error
+                    } finally {
+                        isProcessing = false;
+                    }
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between iterations
+            }
+        }
+    </script>
+</body>
+</html>
